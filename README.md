@@ -34,6 +34,15 @@ This service handles multiple image conversion formats optimized for web use:
 - Redis 7 (message broker + result backend)
 - Docker + docker-compose
 
+**Frontend:**
+- React 19 with TypeScript
+- Vite 7 (build tool and dev server)
+- TanStack Query (data fetching and caching)
+- React Hook Form + Zod (form management and validation)
+- Tailwind CSS + shadcn/ui (styling and components)
+- React Router (routing)
+- Axios (HTTP client)
+
 **Image Processing:**
 - Pillow 10.2.0 (image operations, WebP encoding)
 - pillow-heif (HEIC decoding via libheif)
@@ -66,7 +75,7 @@ This service handles multiple image conversion formats optimized for web use:
 - 4GB RAM (8GB recommended)
 - 2GB disk space
 
-### Running the Service
+### Running the Backend Service
 
 ```bash
 # Start the service
@@ -81,6 +90,57 @@ curl http://localhost:8000/health
 # Stop the service
 docker-compose down
 ```
+
+### Running the Frontend
+
+The frontend is a modern React + TypeScript application built with Vite.
+
+**Prerequisites:**
+- Node.js 18+
+- npm or yarn
+
+**Installation:**
+
+```bash
+# Navigate to frontend directory
+cd frontend
+
+# Install dependencies
+npm install
+```
+
+**Development:**
+
+```bash
+# Start development server
+npm run dev
+```
+
+The frontend will be available at **http://localhost:5173**
+
+The Vite dev server includes:
+- Hot Module Replacement (HMR) for instant updates
+- API proxy to backend (http://localhost:8000)
+- TypeScript type checking
+
+**Production Build:**
+
+```bash
+# Build for production
+npm run build
+
+# Preview production build locally
+npm run preview
+```
+
+**Additional Commands:**
+
+```bash
+# Run ESLint
+npm run lint
+```
+
+**Note:** The frontend expects the backend service to be running on port 8000. Make sure the backend is started before using the frontend.
 
 ### API Usage
 
@@ -118,6 +178,12 @@ image_processing/
 │   ├── requirements.txt             # Python dependencies
 │   ├── Dockerfile                   # Container definition
 │   └── test_images/                 # Sample files
+├── frontend/
+│   ├── src/                         # React application source
+│   ├── public/                      # Static assets
+│   ├── package.json                 # Node dependencies
+│   ├── vite.config.ts               # Vite configuration
+│   └── tsconfig.json                # TypeScript configuration
 ├── docker-compose.yml               # Service orchestration
 ├── ENDPOINTS.md                     # API reference
 ├── PROJECT_KNOWLEDGE.md             # Project knowledge base

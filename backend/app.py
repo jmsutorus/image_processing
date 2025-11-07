@@ -10,6 +10,7 @@ import magic
 from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 from converter import convert_image, ConversionError
 from tasks import convert_image_task, batch_convert_images_task
@@ -23,6 +24,21 @@ app = FastAPI(
     title="Image Conversion Service",
     description="Convert HEIC, DNG, and JPG images to JPEG or WebP with metadata preservation",
     version="1.0.0"
+)
+
+# Configure CORS for frontend access
+# Must be added immediately after FastAPI app initialization
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all HTTP methods
+    allow_headers=["*"],  # Allow all headers
+    expose_headers=["*"],  # Expose all headers
 )
 
 # Configuration constants
@@ -641,13 +657,13 @@ async def get_batch_job_status(batch_id: str):
             percent = 100
             if failed == 0:
                 overall_status = "SUCCESS"
-                message = f"All {completed} files converted successfully. Use GET /jobs/batch/{{batch_id}}/results to download."
+                message = f"All {completed} files converted successfully."
             elif completed == 0:
                 overall_status = "FAILURE"
                 message = f"All {failed} files failed to convert."
             else:
                 overall_status = "PARTIAL"
-                message = f"Batch completed with {completed} successes and {failed} failures. Use GET /jobs/batch/{{batch_id}}/results to download successful conversions."
+                message = f"Batch completed with {completed} successes and {failed} failures."
 
         return {
             "batch_id": batch_id,

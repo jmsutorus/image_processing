@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__shadcn__get_add_command_for_items",
+      "mcp__shadcn__get_item_examples_from_registries",
+      "mcp__context7__get-library-docs",
+      "WebSearch",
+      "SlashCommand(/dev-docs:*)",
+      "Bash(npm install:*)",
+      "Bash(npx tsc:*)",
+      "Bash(npm run build:*)",
+      "Bash(curl:*)",
+      "Bash(docker exec:*)",
+      "Bash(docker cp:*)",
+      "Bash(python3:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

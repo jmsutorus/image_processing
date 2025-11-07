@@ -1,0 +1,17 @@
+# Web Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+
+# Async Task Queue (Phase 2)
+celery==5.3.4
+redis==5.0.1
+
+# Image Processing
+pillow==10.2.0
+pillow-heif==0.15.0
+rawpy==0.19.0
+numpy<2.0  # rawpy 0.19.0 requires numpy 1.x for binary compatibility
+
+# Utilities
+python-multipart==0.0.6  # File upload support
+python-magic==0.4.27     # MIME type validation

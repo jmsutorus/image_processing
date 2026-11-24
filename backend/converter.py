@@ -1,27 +1,50 @@
 """
-Image conversion module for HEIC, DNG, and JPG to JPEG/WebP.
+Image conversion module for HEIC, DNG, JPG, PNG and WebP to JPEG/WebP.
 
-This module provides functions to convert HEIC (High-Efficiency Image Container),
-DNG (Digital Negative), and JPG formats to JPEG or WebP with full metadata preservation.
+Every conversion runs through one pipeline:
+
+    load (format-specific) -> apply EXIF orientation -> resize -> clean metadata -> encode
+
+Metadata handling:
+    - EXIF orientation is applied to the pixels and the tag is reset to 1, so
+      viewers never rotate the image a second time.
+    - GPS data is removed by default (``strip_gps=True``). XMP is dropped as
+      well in that mode because it can carry its own copy of the location.
+    - ICC color profiles are preserved.
 """
 
 import io
-import os
-import tempfile
-import subprocess
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 
 import pillow_heif
 import rawpy
-from PIL import Image, ImageOps
+from PIL import Image
 
 # Register HEIF opener globally (call once at module level)
 pillow_heif.register_heif_opener()
 
+EXIF_ORIENTATION = 0x0112
+EXIF_GPS_IFD = 0x8825
+
+# EXIF orientation value -> transpose operations that undo it
+_ORIENTATION_TRANSPOSE = {
+    2: [Image.Transpose.FLIP_LEFT_RIGHT],
+    3: [Image.Transpose.ROTATE_180],
+    4: [Image.Transpose.FLIP_TOP_BOTTOM],
+    5: [Image.Transpose.TRANSPOSE],
+    6: [Image.Transpose.ROTATE_270],
+    7: [Image.Transpose.TRANSVERSE],
+    8: [Image.Transpose.ROTATE_90],
+}
+
+RAW_EXTENSIONS = {'.dng'}
+PILLOW_EXTENSIONS = {'.heic', '.heif', '.jpg', '.jpeg', '.png', '.webp'}
+SUPPORTED_EXTENSIONS = RAW_EXTENSIONS | PILLOW_EXTENSIONS
+
 
 class ConversionError(Exception):
-    """Raised when image conversion fails"""
+    """Raised when image conversion fails (usually because the input is invalid)."""
     pass
 
 
@@ -30,418 +53,279 @@ def convert_image(
     filename: str,
     output_format: Literal["jpeg", "webp"] = "jpeg",
     lossless: bool = False,
-    quality: int = 85
+    quality: int = 85,
+    max_dimension: Optional[int] = None,
+    strip_gps: bool = True,
 ) -> bytes:
     """
-    Convert HEIC, DNG, or JPG to JPEG or WebP with metadata preservation.
+    Convert an image to JPEG or WebP.
 
     Args:
         input_bytes: Raw file bytes
-        filename: Original filename (used to determine type)
-        output_format: Output format ('jpeg' or 'webp')
-        lossless: For WebP only - use lossless compression (default: False)
-        quality: Quality setting 0-100 (default: 85)
-                 For JPEG: 0=worst, 95=best
-                 For WebP lossy: 0=smallest, 100=largest
-                 For WebP lossless: 0=fastest, 100=best compression
+        filename: Original filename (only the extension is used)
+        output_format: 'jpeg' or 'webp'
+        lossless: WebP only - use lossless compression
+        quality: 0-100. JPEG is capped at 95. For lossless WebP this is the
+                 compression effort (0=fastest, 100=smallest).
+        max_dimension: If set, downscale so the longest edge is at most this
+                       many pixels. Images are never upscaled.
+        strip_gps: Remove GPS location data (and XMP) from the output.
 
     Returns:
-        Image bytes in specified format
+        Encoded image bytes
 
     Raises:
-        ConversionError: If conversion fails
+        ConversionError: If the input can't be decoded or encoding fails
     """
     file_ext = Path(filename).suffix.lower()
+    if file_ext not in SUPPORTED_EXTENSIONS:
+        raise ConversionError(f"Unsupported file type: {file_ext}")
+    if output_format not in ("jpeg", "webp"):
+        raise ConversionError(f"Unsupported output format: {output_format}")
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        input_path = os.path.join(tmpdir, filename)
-
-        # Determine output extension
-        output_ext = ".jpg" if output_format == "jpeg" else ".webp"
-        output_path = os.path.join(tmpdir, f"output{output_ext}")
-
-        try:
-            # Write input file
-            with open(input_path, 'wb') as f:
-                f.write(input_bytes)
-
-            # Convert based on input format and output format
-            if output_format == "jpeg":
-                # Use existing JPEG conversion logic
-                if file_ext in ['.heic', '.heif']:
-                    _convert_heic(input_path, output_path)
-                elif file_ext == '.dng':
-                    _convert_dng(input_path, output_path)
-                elif file_ext in ['.jpg', '.jpeg']:
-                    # For JPEG to JPEG, just copy with quality adjustment
-                    _convert_jpg_to_jpeg(input_path, output_path, quality)
-                else:
-                    raise ConversionError(f"Unsupported file type: {file_ext}")
-
-            elif output_format == "webp":
-                # Load image to PIL format first, then save as WebP
-                if file_ext in ['.heic', '.heif']:
-                    image, metadata = _load_heic(input_path)
-                elif file_ext == '.dng':
-                    image, metadata = _load_dng(input_path)
-                elif file_ext in ['.jpg', '.jpeg']:
-                    image, metadata = _load_jpg(input_path)
-                else:
-                    raise ConversionError(f"Unsupported file type: {file_ext}")
-
-                # Save as WebP with metadata
-                _save_webp(image, output_path, metadata, lossless, quality)
-
-            else:
-                raise ConversionError(f"Unsupported output format: {output_format}")
-
-            # Read result
-            with open(output_path, 'rb') as f:
-                return f.read()
-
-        except ConversionError:
-            raise
-        except Exception as e:
-            raise ConversionError(f"Conversion failed: {str(e)}")
-
-
-def _convert_heic(input_path: str, output_path: str):
-    """
-    Convert HEIC to JPEG with EXIF preservation.
-
-    Args:
-        input_path: Path to input HEIC file
-        output_path: Path for output JPEG file
-
-    Raises:
-        ConversionError: If HEIC conversion fails
-    """
     try:
-        with Image.open(input_path) as image:
-            # Extract EXIF metadata
-            exif_data = image.info.get('exif')
+        if file_ext in RAW_EXTENSIONS:
+            image, metadata = _load_dng(input_bytes)
+        else:
+            image, metadata = _load_with_pillow(input_bytes)
 
-            # Convert and save with high quality
-            image.convert('RGB').save(
-                output_path,
-                format="JPEG",
-                quality=95,
-                subsampling=0,  # No chroma subsampling (4:4:4)
-                exif=exif_data
-            )
-    except Exception as e:
-        raise ConversionError(f"HEIC conversion failed: {e}")
+        image, exif = _apply_orientation(image, metadata.get('exif'))
+        image = _resize(image, max_dimension)
+        exif_bytes = _clean_exif(exif, strip_gps)
 
-
-def _convert_dng(input_path: str, output_path: str):
-    """
-    Convert DNG to JPEG with metadata copying via exiftool.
-
-    This function performs RAW development with proper white balance,
-    color space, and brightness adjustment. It then copies metadata
-    using exiftool and applies EXIF orientation to correct rotation.
-
-    Args:
-        input_path: Path to input DNG file
-        output_path: Path for output JPEG file
-
-    Raises:
-        ConversionError: If DNG conversion fails
-    """
-    try:
-        # Step 1: Develop RAW with rawpy with proper brightness settings
-        with rawpy.imread(input_path) as raw:
-            # Use default settings which enable auto-brightness
-            # exp_shift for exposure adjustment, auto_bright_thr for clipping threshold
-            rgb = raw.postprocess(
-                use_camera_wb=True,           # Use camera white balance
-                output_color=rawpy.ColorSpace.sRGB,  # Web-compatible color space
-                no_auto_bright=False,         # Enable auto-brightness (default)
-                auto_bright_thr=0.01,         # 1% clipping threshold (default)
-                exp_shift=2.0,                # Exposure shift: 1.0 = +1 stop brighter
-                exp_preserve_highlights=0.5,  # Preserve some highlights when brightening
-                gamma=(2.222, 4.5),           # Standard gamma curve (BT.709)
-                output_bps=8                  # 8-bit output for JPEG
-            )
-
-        # Step 2: Save RGB array as JPEG (no metadata yet)
-        image = Image.fromarray(rgb)
-        image.save(
-            output_path,
-            format="JPEG",
-            quality=100,
-            subsampling=0  # No chroma subsampling (4:4:4)
-        )
-
-        # Step 3: Copy metadata using exiftool (CRITICAL STEP)
-        subprocess.run(
-            [
-                'exiftool',
-                '-TagsFromFile', input_path,
-                '-all:all',  # Copy all tags
-                '-overwrite_original',
-                '-n',  # Don't print tag names
-                output_path
-            ],
-            shell=False,      # SECURITY: Never use shell=True
-            check=True,
-            capture_output=True,
-            timeout=30
-        )
-
-        # Step 4: Apply EXIF orientation to fix rotation issues
-        # Re-open the image with metadata and apply orientation
-        image = Image.open(output_path)
-
-        # exif_transpose always returns an Image (either transposed or copy)
-        # unless you use in_place=True
-        oriented_image = ImageOps.exif_transpose(image)
-
-        # Save the oriented image (this will have orientation=1 and correct pixels)
-        if oriented_image:
-            oriented_image.save(
-                output_path,
-                format="JPEG",
-                quality=95,
-                subsampling=0
-            )
-
-        # Clean up
-        image.close()
-
-    except subprocess.CalledProcessError as e:
-        raise ConversionError(f"exiftool failed: {e.stderr.decode()}")
-    except Exception as e:
-        raise ConversionError(f"DNG conversion failed: {e}")
-
-
-def _convert_jpg_to_jpeg(input_path: str, output_path: str, quality: int = 85):
-    """
-    Convert JPG to JPEG with quality adjustment and metadata preservation.
-
-    Args:
-        input_path: Path to input JPG file
-        output_path: Path for output JPEG file
-        quality: JPEG quality (0-100)
-
-    Raises:
-        ConversionError: If conversion fails
-    """
-    try:
-        with Image.open(input_path) as image:
-            # Extract metadata
-            exif_data = image.info.get('exif')
-            icc_profile = image.info.get('icc_profile')
-
-            # Convert to RGB if needed
-            if image.mode not in ('RGB', 'L'):
-                image = image.convert('RGB')
-
-            # Save with specified quality
-            save_kwargs = {
-                'format': 'JPEG',
-                'quality': min(quality, 95),  # Cap at 95 per Pillow docs
-                'optimize': True
-            }
-
-            if exif_data:
-                save_kwargs['exif'] = exif_data
-            if icc_profile:
-                save_kwargs['icc_profile'] = icc_profile
-
-            image.save(output_path, **save_kwargs)
-
-    except Exception as e:
-        raise ConversionError(f"JPG to JPEG conversion failed: {e}")
-
-
-def _load_heic(input_path: str) -> tuple[Image.Image, dict]:
-    """
-    Load HEIC file and return PIL Image with metadata.
-
-    Args:
-        input_path: Path to input HEIC file
-
-    Returns:
-        Tuple of (PIL Image, metadata dict)
-
-    Raises:
-        ConversionError: If loading fails
-    """
-    try:
-        with Image.open(input_path) as image:
-            # Extract metadata
-            metadata = {
-                'exif': image.info.get('exif'),
-                'icc_profile': image.info.get('icc_profile'),
-                'xmp': image.info.get('xmp')
-            }
-
-            # Convert to RGB and return a copy (since we're in 'with' block)
-            rgb_image = image.convert('RGB').copy()
-
-        return rgb_image, metadata
-
-    except Exception as e:
-        raise ConversionError(f"HEIC loading failed: {e}")
-
-
-def _load_dng(input_path: str) -> tuple[Image.Image, dict]:
-    """
-    Load DNG file with RAW processing and return PIL Image with metadata.
-
-    Args:
-        input_path: Path to input DNG file
-
-    Returns:
-        Tuple of (PIL Image, metadata dict)
-
-    Raises:
-        ConversionError: If loading fails
-    """
-    try:
-        # Step 1: Develop RAW with rawpy
-        with rawpy.imread(input_path) as raw:
-            rgb = raw.postprocess(
-                use_camera_wb=True,
-                output_color=rawpy.ColorSpace.sRGB,
-                no_auto_bright=False,
-                auto_bright_thr=0.01,
-                exp_shift=2.0,
-                exp_preserve_highlights=0.5,
-                gamma=(2.222, 4.5),
-                output_bps=8
-            )
-
-        # Step 2: Create PIL Image
-        image = Image.fromarray(rgb)
-
-        # Step 3: Extract metadata from original DNG using exiftool
-        # We'll save to temp JPEG first to extract metadata properly
-        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
-            tmp_path = tmp.name
-
-        try:
-            # Save temp JPEG
-            image.save(tmp_path, format='JPEG', quality=100)
-
-            # Copy metadata from DNG to temp JPEG
-            subprocess.run(
-                [
-                    'exiftool',
-                    '-TagsFromFile', input_path,
-                    '-all:all',
-                    '-overwrite_original',
-                    '-n',
-                    tmp_path
-                ],
-                shell=False,
-                check=True,
-                capture_output=True,
-                timeout=30
-            )
-
-            # Re-open to get metadata
-            with Image.open(tmp_path) as img_with_meta:
-                metadata = {
-                    'exif': img_with_meta.info.get('exif'),
-                    'icc_profile': img_with_meta.info.get('icc_profile'),
-                    'xmp': img_with_meta.info.get('xmp')
-                }
-
-                # Apply orientation correction
-                oriented_image = ImageOps.exif_transpose(img_with_meta)
-                if oriented_image:
-                    image = oriented_image.copy()
-
-        finally:
-            # Clean up temp file
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-
-        return image, metadata
-
-    except subprocess.CalledProcessError as e:
-        raise ConversionError(f"DNG metadata extraction failed: {e.stderr.decode()}")
-    except Exception as e:
-        raise ConversionError(f"DNG loading failed: {e}")
-
-
-def _load_jpg(input_path: str) -> tuple[Image.Image, dict]:
-    """
-    Load JPG file and return PIL Image with metadata.
-
-    Args:
-        input_path: Path to input JPG file
-
-    Returns:
-        Tuple of (PIL Image, metadata dict)
-
-    Raises:
-        ConversionError: If loading fails
-    """
-    try:
-        with Image.open(input_path) as image:
-            # Extract metadata
-            metadata = {
-                'exif': image.info.get('exif'),
-                'icc_profile': image.info.get('icc_profile'),
-                'xmp': image.info.get('xmp')
-            }
-
-            # Convert to RGB if needed and return a copy
-            if image.mode not in ('RGB', 'L'):
-                rgb_image = image.convert('RGB').copy()
-            else:
-                rgb_image = image.copy()
-
-        return rgb_image, metadata
-
-    except Exception as e:
-        raise ConversionError(f"JPG loading failed: {e}")
-
-
-def _save_webp(
-    image: Image.Image,
-    output_path: str,
-    metadata: dict,
-    lossless: bool = False,
-    quality: int = 85
-):
-    """
-    Save PIL Image as WebP with metadata preservation.
-
-    Args:
-        image: PIL Image object
-        output_path: Path for output WebP file
-        metadata: Metadata dict with 'exif', 'icc_profile', 'xmp' keys
-        lossless: Use lossless compression
-        quality: Quality setting (0-100)
-
-    Raises:
-        ConversionError: If saving fails
-    """
-    try:
-        # Prepare save options
-        save_kwargs = {
-            'format': 'WebP',
-            'lossless': lossless,
-            'quality': quality,
-            'method': 4  # Balance of speed and compression
+        out_metadata = {
+            'exif': exif_bytes,
+            'icc_profile': metadata.get('icc_profile'),
+            'xmp': None if strip_gps else metadata.get('xmp'),
         }
 
-        # Add metadata if available
-        if metadata.get('exif'):
-            save_kwargs['exif'] = metadata['exif']
+        if output_format == "jpeg":
+            return _encode_jpeg(image, out_metadata, quality)
+        return _encode_webp(image, out_metadata, lossless, quality)
 
-        if metadata.get('icc_profile'):
-            save_kwargs['icc_profile'] = metadata['icc_profile']
-
-        if metadata.get('xmp'):
-            save_kwargs['xmp'] = metadata['xmp']
-
-        # Save as WebP
-        image.save(output_path, **save_kwargs)
-
+    except ConversionError:
+        raise
     except Exception as e:
-        raise ConversionError(f"WebP saving failed: {e}")
+        raise ConversionError(f"Conversion failed: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Loading
+# ---------------------------------------------------------------------------
+
+def _load_with_pillow(input_bytes: bytes) -> tuple[Image.Image, dict]:
+    """Load HEIC/JPEG/PNG/WebP. Only the first frame of animated images is used."""
+    try:
+        with Image.open(io.BytesIO(input_bytes)) as image:
+            image.load()
+            metadata = {
+                'exif': image.info.get('exif'),
+                'icc_profile': image.info.get('icc_profile'),
+                'xmp': image.info.get('xmp'),
+            }
+            original_mode = image.mode
+            loaded = image.copy()
+    except Exception as e:
+        raise ConversionError(f"Could not read image: {e}")
+
+    # A CMYK profile no longer matches once the pixels are converted to RGB
+    if original_mode == 'CMYK':
+        metadata['icc_profile'] = None
+
+    return loaded, metadata
+
+
+def _load_dng(input_bytes: bytes) -> tuple[Image.Image, dict]:
+    """
+    Develop a DNG with rawpy and read its EXIF with Pillow.
+
+    rawpy already applies the sensor orientation (``flip``) during
+    postprocess, so the returned EXIF has Orientation reset to 1 to stop the
+    pipeline from rotating the image a second time.
+    """
+    try:
+        with rawpy.imread(io.BytesIO(input_bytes)) as raw:
+            rgb = raw.postprocess(
+                use_camera_wb=True,                  # Camera white balance
+                output_color=rawpy.ColorSpace.sRGB,  # Web-compatible color space
+                no_auto_bright=False,                # Auto-brightness on
+                auto_bright_thr=0.01,                # 1% clipping threshold
+                exp_shift=2.0,                       # Linear exposure multiplier (+1 stop)
+                exp_preserve_highlights=0.5,         # Protect highlights when brightening
+                gamma=(2.222, 4.5),                  # BT.709 gamma
+                output_bps=8,
+            )
+    except Exception as e:
+        raise ConversionError(f"Could not develop DNG: {e}")
+
+    metadata = {
+        'exif': _dng_exif(input_bytes),
+        'icc_profile': None,  # Output is plain sRGB from rawpy
+        'xmp': None,
+    }
+    return Image.fromarray(rgb), metadata
+
+
+# IFD0 tags worth carrying over from a DNG. The rest of IFD0 describes the raw
+# sensor data (strip offsets, color matrices, DNG version...) and is meaningless
+# on a developed image.
+_DNG_IFD0_KEEP = {
+    0x010E,  # ImageDescription
+    0x010F,  # Make
+    0x0110,  # Model
+    0x0131,  # Software
+    0x0132,  # DateTime
+    0x013B,  # Artist
+    0x8298,  # Copyright
+}
+EXIF_SUB_IFD = 0x8769
+EXIF_MAKER_NOTE = 0x927C
+
+
+def _dng_exif(input_bytes: bytes) -> Optional[bytes]:
+    """Build a clean EXIF block (camera, capture settings, GPS) from a DNG's TIFF headers."""
+    try:
+        with Image.open(io.BytesIO(input_bytes)) as tiff:
+            source = tiff.getexif()
+            exif = Image.Exif()
+            for tag in _DNG_IFD0_KEEP:
+                if tag in source:
+                    exif[tag] = source[tag]
+            exif[EXIF_ORIENTATION] = 1
+
+            sub_ifd = dict(source.get_ifd(EXIF_SUB_IFD))
+            sub_ifd.pop(EXIF_MAKER_NOTE, None)  # Large, camera-private, offsets break on rewrite
+            if sub_ifd:
+                exif[EXIF_SUB_IFD] = sub_ifd
+
+            gps_ifd = dict(source.get_ifd(EXIF_GPS_IFD))
+            if gps_ifd:
+                exif[EXIF_GPS_IFD] = gps_ifd
+
+            return exif.tobytes()
+    except Exception:
+        # Metadata is a nice-to-have; never fail the conversion over it
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Transform
+# ---------------------------------------------------------------------------
+
+def _parse_exif(exif_bytes: Optional[bytes]) -> Optional[Image.Exif]:
+    if not exif_bytes:
+        return None
+    try:
+        exif = Image.Exif()
+        exif.load(exif_bytes)
+        return exif
+    except Exception:
+        return None
+
+
+def _apply_orientation(image: Image.Image, exif_bytes: Optional[bytes]) -> tuple[Image.Image, Optional[Image.Exif]]:
+    """Rotate/flip the pixels to match the EXIF orientation, then reset the tag to 1."""
+    exif = _parse_exif(exif_bytes)
+    if exif is None:
+        return image, None
+
+    orientation = exif.get(EXIF_ORIENTATION, 1)
+    for op in _ORIENTATION_TRANSPOSE.get(orientation, []):
+        image = image.transpose(op)
+
+    if EXIF_ORIENTATION in exif:
+        exif[EXIF_ORIENTATION] = 1
+
+    return image, exif
+
+
+def _resize(image: Image.Image, max_dimension: Optional[int]) -> Image.Image:
+    """Downscale so the longest edge is <= max_dimension. Never upscales."""
+    if not max_dimension or max(image.size) <= max_dimension:
+        return image
+    resized = image.copy()
+    resized.thumbnail((max_dimension, max_dimension), Image.Resampling.LANCZOS)
+    return resized
+
+
+def _clean_exif(exif: Optional[Image.Exif], strip_gps: bool) -> Optional[bytes]:
+    """Serialize EXIF, removing GPS data if requested.
+
+    If the EXIF can't be rewritten safely while stripping GPS, it is dropped
+    entirely rather than risking a location leak.
+    """
+    if exif is None:
+        return None
+    try:
+        if strip_gps and EXIF_GPS_IFD in exif:
+            del exif[EXIF_GPS_IFD]
+        return exif.tobytes()
+    except Exception:
+        return None
+
+
+def _normalize_mode(image: Image.Image, keep_alpha: bool) -> Image.Image:
+    """Convert to RGB/RGBA/L. Transparent images become RGBA, or are flattened onto white."""
+    has_alpha = image.mode in ('RGBA', 'LA', 'PA') or (
+        image.mode == 'P' and 'transparency' in image.info
+    )
+    if has_alpha:
+        rgba = image.convert('RGBA')
+        if keep_alpha:
+            return rgba
+        background = Image.new('RGB', rgba.size, (255, 255, 255))
+        background.paste(rgba, mask=rgba.getchannel('A'))
+        return background
+    if image.mode in ('RGB', 'L'):
+        return image
+    return image.convert('RGB')
+
+
+# ---------------------------------------------------------------------------
+# Encoding
+# ---------------------------------------------------------------------------
+
+def _encode_jpeg(image: Image.Image, metadata: dict, quality: int) -> bytes:
+    image = _normalize_mode(image, keep_alpha=False)
+    quality = min(quality, 95)  # Pillow: values above 95 only bloat the file
+    save_kwargs = {
+        'format': 'JPEG',
+        'quality': quality,
+        'optimize': True,
+        # Full chroma resolution for high-quality output, 4:2:0 otherwise
+        'subsampling': 0 if quality >= 90 else 2,
+    }
+    if metadata.get('exif'):
+        save_kwargs['exif'] = metadata['exif']
+    if metadata.get('icc_profile'):
+        save_kwargs['icc_profile'] = metadata['icc_profile']
+
+    buffer = io.BytesIO()
+    try:
+        image.save(buffer, **save_kwargs)
+    except Exception as e:
+        raise ConversionError(f"JPEG encoding failed: {e}")
+    return buffer.getvalue()
+
+
+def _encode_webp(image: Image.Image, metadata: dict, lossless: bool, quality: int) -> bytes:
+    image = _normalize_mode(image, keep_alpha=True)
+    save_kwargs = {
+        'format': 'WebP',
+        'lossless': lossless,
+        'quality': quality,
+        'method': 4,  # Balance of speed and compression
+    }
+    if metadata.get('exif'):
+        save_kwargs['exif'] = metadata['exif']
+    if metadata.get('icc_profile'):
+        save_kwargs['icc_profile'] = metadata['icc_profile']
+    if metadata.get('xmp'):
+        save_kwargs['xmp'] = metadata['xmp']
+
+    buffer = io.BytesIO()
+    try:
+        image.save(buffer, **save_kwargs)
+    except Exception as e:
+        raise ConversionError(f"WebP encoding failed: {e}")
+    return buffer.getvalue()

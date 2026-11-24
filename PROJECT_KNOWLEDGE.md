@@ -2,6 +2,14 @@
 
 **Last Updated: 2025-01-05**
 
+> **Historical (superseded 2026-11-24).** These are the original design notes. Since then:
+> - **exiftool was removed.** DNG metadata is read with Pillow (DNG is TIFF-based) and filtered to standard camera/capture tags. No subprocess or temp files are used anymore.
+> - **Celery/Redis async and batch processing were removed.** They were never wired into `app.py`, and nothing used them.
+> - **New features:** `max_dimension` resizing, `strip_gps` (on by default), and PNG/WebP input.
+> - **rawpy already applies the sensor flip** during `postprocess`, so DNG output must not be rotated again from EXIF Orientation. Earlier versions did this, and portrait DNGs came out sideways.
+>
+> See README.md and ENDPOINTS.md for the current state.
+
 ---
 
 ## Project Overview

@@ -1,7 +1,5 @@
 import { ConvertPage } from '@/features/convert'
-import { BatchPage } from '@/features/batch'
 import { Toaster } from 'sonner'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Card, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Header, Footer } from '@/components/Layout'
 
@@ -17,28 +15,12 @@ function App() {
             <CardHeader className="p-4 sm:p-6">
               <CardTitle className="text-lg sm:text-xl">Image Conversion Service</CardTitle>
               <CardDescription className="text-xs sm:text-sm">
-                Convert HEIC, DNG, and JPEG images to JPEG or WebP format with metadata preservation
+                Convert HEIC, DNG, JPEG, PNG, and WebP images to JPEG or WebP format with metadata preservation
               </CardDescription>
             </CardHeader>
           </Card>
 
-          {/* Tabs for Single/Batch Conversion */}
-          <Tabs defaultValue="single" className="w-full">
-            <TabsList className="grid w-full max-w-md mx-auto grid-cols-2">
-              <TabsTrigger value="single" className="text-xs sm:text-sm">
-                Single File
-              </TabsTrigger>
-              <TabsTrigger value="batch" className="text-xs sm:text-sm">
-                Batch Upload
-              </TabsTrigger>
-            </TabsList>
-            <TabsContent value="single" className="mt-4 sm:mt-6">
-              <ConvertPage />
-            </TabsContent>
-            <TabsContent value="batch" className="mt-4 sm:mt-6">
-              <BatchPage />
-            </TabsContent>
-          </Tabs>
+          <ConvertPage />
         </div>
       </main>
 

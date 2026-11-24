@@ -98,7 +98,7 @@ export function ConvertPage() {
         <CardHeader>
           <CardTitle>Single File Conversion</CardTitle>
           <CardDescription>
-            Convert HEIC, DNG, and JPEG images to JPEG or WebP format
+            Convert HEIC, DNG, JPEG, PNG, and WebP images to JPEG or WebP format
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">

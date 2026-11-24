@@ -17,6 +17,8 @@ export function FileDropzone({
     'image/heic': ['.heic', '.heif'],
     'image/x-adobe-dng': ['.dng'],
     'image/jpeg': ['.jpg', '.jpeg'],
+    'image/png': ['.png'],
+    'image/webp': ['.webp'],
   },
   disabled = false,
 }: FileDropzoneProps) {
